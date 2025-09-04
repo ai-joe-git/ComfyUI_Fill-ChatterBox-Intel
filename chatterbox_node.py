@@ -22,28 +22,18 @@ def get_intel_compatible_device(use_cpu=False):
     # Force CPU for Intel Arc TTS operations for stability
     if is_intel_arc_system():
         return "cpu"  # Force CPU even with XPU available
-    elif torch.backends.mps.is_available():
-        return "mps"
     elif torch.cuda.is_available():
         return "cuda"
+    elif torch.backends.mps.is_available():
+        return "mps"
     else:
         return "cpu"
-
-def intel_safe_cache_clear():
-    """Clear cache compatible with Intel Arc"""
-    if is_intel_arc_system():
-        # Intel Arc doesn't need explicit cache clearing
-        pass
-    elif torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    elif torch.backends.mps.is_available():
-        torch.mps.empty_cache()
 
 def intel_safe_seed_setting(seed):
     """Set seeds compatible with Intel Arc"""
     torch.manual_seed(seed)
     if is_intel_arc_system():
-        # Intel Arc seed setting if needed
+        # Intel Arc seed setting
         pass
     elif torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
@@ -51,14 +41,21 @@ def intel_safe_seed_setting(seed):
     elif torch.backends.mps.is_available():
         torch.mps.manual_seed(seed)
 
-# Monkey patch torch.load for Intel Arc compatibility
+def intel_safe_cache_clear():
+    """Clear cache safely for Intel Arc systems"""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+    # Intel Arc: No explicit cache clearing needed
+
+# Monkey patch torch.load to use Intel Arc compatible map_location
 original_torch_load = torch.load
 
 def patched_torch_load(*args, **kwargs):
     if 'map_location' not in kwargs:
-        # Always use CPU for Intel Arc compatibility
         if is_intel_arc_system():
-            device = "cpu"
+            device = "cpu"  # Force CPU for Intel Arc
         elif torch.backends.mps.is_available():
             device = "mps"
         elif torch.cuda.is_available():
@@ -78,7 +75,6 @@ class AudioNodeBase:
         """Create an empty tensor with dimensions based on audio duration."""
         audio_duration = audio['waveform'].shape[-1] / audio['sample_rate']
         num_frames = int(audio_duration * frame_rate)
-        
         if channels is None:
             return torch.zeros((num_frames, height, width), dtype=torch.float32)
         else:
@@ -118,7 +114,7 @@ class FL_ChatterboxTTSNode(AudioNodeBase):
     
     def generate_speech(self, text, exaggeration, cfg_weight, temperature, seed, audio_prompt=None, use_cpu=False, keep_model_loaded=False):
         """
-        Generate speech from text with Intel Arc XPU compatibility.
+        Generate speech from text - Intel Arc XPU Compatible Version.
         
         Args:
             text: The text to convert to speech.
@@ -129,7 +125,7 @@ class FL_ChatterboxTTSNode(AudioNodeBase):
             audio_prompt: AUDIO object containing the reference voice for TTS voice cloning.
             use_cpu: If True, forces CPU usage even if CUDA is available.
             keep_model_loaded: If True, keeps the model loaded in memory after generation.
-        
+            
         Returns:
             Tuple of (audio, message)
         """
@@ -147,7 +143,7 @@ class FL_ChatterboxTTSNode(AudioNodeBase):
         if use_cpu:
             message = "Using CPU for inference (GPU disabled)"
         elif is_intel_arc_system() and device == "cpu":
-            message = "Using CPU for inference (Intel Arc XPU detected - CPU forced for TTS stability)"
+            message = "Using CPU for inference (Intel Arc XPU detected - CPU forced for stability)"
         elif torch.backends.mps.is_available() and device == "mps":
             message = "Using MPS (Mac GPU) for inference"
         elif torch.cuda.is_available() and device == "cuda":
@@ -178,6 +174,7 @@ class FL_ChatterboxTTSNode(AudioNodeBase):
                     message += f"\nAudio prompt file created successfully: {file_size} bytes"
                 else:
                     message += f"\nWarning: Audio prompt file was not created properly"
+                    
             except Exception as e:
                 message += f"\nError creating audio prompt file: {str(e)}"
                 audio_prompt_path = None
@@ -185,6 +182,7 @@ class FL_ChatterboxTTSNode(AudioNodeBase):
         tts_model = None
         wav = None  # Initialize wav to None
         audio_data = {"waveform": torch.zeros((1, 2, 1)), "sample_rate": 16000}  # Initialize with empty audio
+        
         pbar = ProgressBar(100)  # Simple progress bar for overall process
         
         try:
@@ -231,21 +229,17 @@ class FL_ChatterboxTTSNode(AudioNodeBase):
                 "sample_rate": tts_model.sr
             }
             message += f"\nSpeech generated successfully"
-            return (audio_data, message)
             
         except RuntimeError as e:
-            # Check for CUDA or MPS errors and attempt fallback to CPU
+            # Check for device-specific errors and attempt fallback to CPU
             error_str = str(e)
             fallback_to_cpu = False
             
-            if "CUDA" in error_str and device == "cuda":
-                message += "\nCUDA error detected during TTS. Falling back to CPU..."
+            if ("CUDA" in error_str or "XPU" in error_str) and device != "cpu":
+                message += f"\n{device.upper()} error detected during TTS. Falling back to CPU..."
                 fallback_to_cpu = True
             elif "MPS" in error_str and device == "mps":
                 message += "\nMPS error detected during TTS. Falling back to CPU..."
-                fallback_to_cpu = True
-            elif "XPU" in error_str and is_intel_arc_system():
-                message += "\nXPU error detected during TTS. Using CPU..."
                 fallback_to_cpu = True
             
             if fallback_to_cpu:
@@ -276,7 +270,7 @@ class FL_ChatterboxTTSNode(AudioNodeBase):
                     "sample_rate": tts_model.sr
                 }
                 message += f"\nSpeech generated successfully after fallback."
-                return (audio_data, message)
+                
             else:
                 message += f"\nError during TTS: {str(e)}"
                 return (audio_data, message)
@@ -289,9 +283,12 @@ class FL_ChatterboxTTSNode(AudioNodeBase):
             # Clean up all temporary files
             for temp_file in temp_files:
                 if os.path.exists(temp_file):
-                    os.unlink(temp_file)
+                    try:
+                        os.unlink(temp_file)
+                    except:
+                        pass
             
-            # If keep_model_loaded is False, ensure model is not stored
+            # Handle model cleanup
             if not keep_model_loaded and FL_ChatterboxTTSNode._tts_model is not None:
                 message += "\nUnloading TTS model as keep_model_loaded is False."
                 FL_ChatterboxTTSNode._tts_model = None
@@ -299,6 +296,8 @@ class FL_ChatterboxTTSNode(AudioNodeBase):
                 intel_safe_cache_clear()
             
             pbar.update_absolute(100)  # Ensure progress bar completes
+        
+        return (audio_data, message)
 
 # Voice Conversion node
 class FL_ChatterboxVCNode(AudioNodeBase):
@@ -331,8 +330,7 @@ class FL_ChatterboxVCNode(AudioNodeBase):
     
     def convert_voice(self, input_audio, target_voice, seed, use_cpu=False, keep_model_loaded=False):
         """
-        Convert the voice in an audio file to match a target voice.
-        Intel Arc XPU Compatible Version.
+        Convert the voice in an audio file to match a target voice - Intel Arc XPU Compatible Version.
         
         Args:
             input_audio: AUDIO object containing the audio to convert.
@@ -340,7 +338,7 @@ class FL_ChatterboxVCNode(AudioNodeBase):
             seed: Random seed for reproducible generation.
             use_cpu: If True, forces CPU usage even if CUDA is available.
             keep_model_loaded: If True, keeps the model loaded in memory after conversion.
-        
+            
         Returns:
             Tuple of (audio, message)
         """
@@ -358,7 +356,7 @@ class FL_ChatterboxVCNode(AudioNodeBase):
         if use_cpu:
             message = "Using CPU for inference (GPU disabled)"
         elif is_intel_arc_system() and device == "cpu":
-            message = "Using CPU for inference (Intel Arc XPU detected - CPU forced for VC stability)"
+            message = "Using CPU for inference (Intel Arc XPU detected - CPU forced for stability)"
         elif torch.backends.mps.is_available() and device == "mps":
             message = "Using MPS (Mac GPU) for inference"
         elif torch.cuda.is_available() and device == "cuda":
@@ -370,23 +368,26 @@ class FL_ChatterboxVCNode(AudioNodeBase):
         import tempfile
         temp_files = []
         
-        # Create a temporary file for the input audio
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_input:
-            input_audio_path = temp_input.name
-            temp_files.append(input_audio_path)
-        
-        # Save the input audio to the temporary file
-        input_waveform = input_audio['waveform'].squeeze(0)
-        torchaudio.save(input_audio_path, input_waveform, input_audio['sample_rate'])
-        
-        # Create a temporary file for the target voice
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_target:
-            target_voice_path = temp_target.name
-            temp_files.append(target_voice_path)
-        
-        # Save the target voice to the temporary file
-        target_waveform = target_voice['waveform'].squeeze(0)
-        torchaudio.save(target_voice_path, target_waveform, target_voice['sample_rate'])
+        # Create temporary files for input audio and target voice
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_input:
+                input_audio_path = temp_input.name
+                temp_files.append(input_audio_path)
+            
+            input_waveform = input_audio['waveform'].squeeze(0)
+            torchaudio.save(input_audio_path, input_waveform, input_audio['sample_rate'])
+            
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_target:
+                target_voice_path = temp_target.name
+                temp_files.append(target_voice_path)
+            
+            target_waveform = target_voice['waveform'].squeeze(0)
+            torchaudio.save(target_voice_path, target_waveform, target_voice['sample_rate'])
+            
+        except Exception as e:
+            message += f"\nError creating temporary audio files: {str(e)}"
+            empty_audio = {"waveform": torch.zeros((1, 2, 1)), "sample_rate": 16000}
+            return (empty_audio, message)
         
         vc_model = None
         pbar = ProgressBar(100)  # Simple progress bar for overall process
@@ -398,7 +399,7 @@ class FL_ChatterboxVCNode(AudioNodeBase):
                 message += f"\nReusing loaded VC model on {device}..."
             else:
                 if FL_ChatterboxVCNode._vc_model is not None:
-                    message += f"\nUnloading previous VC model (device mismatch or keep_model_loaded is False)..."
+                    message += f"\nUnloading previous VC model (device mismatch)..."
                     FL_ChatterboxVCNode._vc_model = None
                     FL_ChatterboxVCNode._vc_device = None
                     intel_safe_cache_clear()
@@ -424,19 +425,22 @@ class FL_ChatterboxVCNode(AudioNodeBase):
             )
             pbar.update_absolute(90)  # Indicate conversion finished
             
+            audio_data = {
+                "waveform": converted_wav.unsqueeze(0),  # Add batch dimension
+                "sample_rate": vc_model.sr
+            }
+            message += f"\nVoice converted successfully"
+            
         except RuntimeError as e:
-            # Check for CUDA or MPS errors and attempt fallback to CPU
+            # Check for device-specific errors and attempt fallback to CPU
             error_str = str(e)
             fallback_to_cpu = False
             
-            if "CUDA" in error_str and device == "cuda":
-                message += "\nCUDA error detected during VC. Falling back to CPU..."
+            if ("CUDA" in error_str or "XPU" in error_str) and device != "cpu":
+                message += f"\n{device.upper()} error detected during VC. Falling back to CPU..."
                 fallback_to_cpu = True
             elif "MPS" in error_str and device == "mps":
                 message += "\nMPS error detected during VC. Falling back to CPU..."
-                fallback_to_cpu = True
-            elif "XPU" in error_str and is_intel_arc_system():
-                message += "\nXPU error detected during VC. Using CPU..."
                 fallback_to_cpu = True
             
             if fallback_to_cpu:
@@ -458,52 +462,40 @@ class FL_ChatterboxVCNode(AudioNodeBase):
                     target_voice_path=target_voice_path,
                 )
                 pbar.update_absolute(90)  # Indicate conversion finished (fallback)
+                
+                audio_data = {
+                    "waveform": converted_wav.unsqueeze(0),  # Add batch dimension
+                    "sample_rate": vc_model.sr
+                }
+                message += f"\nVoice converted successfully after fallback."
+                
             else:
-                # Re-raise if it's not a CUDA/MPS/XPU error or we're already on CPU
                 message += f"\nError during VC: {str(e)}"
-                pbar.update_absolute(100)  # Ensure progress bar completes on error
+                # Return the original audio in case of error
                 return (input_audio, message)
                 
         except Exception as e:
             message += f"\nAn unexpected error occurred during VC: {str(e)}"
             empty_audio = {"waveform": torch.zeros((1, 2, 1)), "sample_rate": 16000}
-            for temp_file in temp_files:
-                if os.path.exists(temp_file):
-                    os.unlink(temp_file)
-            pbar.update_absolute(100)  # Ensure progress bar completes on error
             return (empty_audio, message)
             
         finally:
             # Clean up all temporary files
             for temp_file in temp_files:
                 if os.path.exists(temp_file):
-                    os.unlink(temp_file)
+                    try:
+                        os.unlink(temp_file)
+                    except:
+                        pass
             
-            # If keep_model_loaded is False, ensure model is not stored
+            # Handle model cleanup
             if not keep_model_loaded and FL_ChatterboxVCNode._vc_model is not None:
                 message += "\nUnloading VC model as keep_model_loaded is False."
                 FL_ChatterboxVCNode._vc_model = None
                 FL_ChatterboxVCNode._vc_device = None
                 intel_safe_cache_clear()
-        
-        # If generation was successful and keep_model_loaded is True, store the model
-        if keep_model_loaded and vc_model is not None:
-            FL_ChatterboxVCNode._vc_model = vc_model
-            FL_ChatterboxVCNode._vc_device = device
-            message += "\nModel will be kept loaded in memory."
-        elif not keep_model_loaded and FL_ChatterboxVCNode._vc_model is not None:
-            message += "\nUnloading VC model as keep_model_loaded is now False."
-            FL_ChatterboxVCNode._vc_model = None
-            FL_ChatterboxVCNode._vc_device = None
-            intel_safe_cache_clear()
-        
-        # Create audio data structure for the output
-        audio_data = {
-            "waveform": converted_wav.unsqueeze(0),  # Add batch dimension
-            "sample_rate": vc_model.sr if vc_model else 16000  # Use default sample rate if model loading failed
-        }
-        message += f"\nVoice converted successfully"
-        pbar.update_absolute(100)  # Ensure progress bar completes on success
+            
+            pbar.update_absolute(100)  # Ensure progress bar completes
         
         return (audio_data, message)
 
