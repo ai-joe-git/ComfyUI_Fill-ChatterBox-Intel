@@ -9,9 +9,6 @@ conformer
 safetensors
 soundfile
 
-# Optional dependencies (comment out if causing issues)
-# diffusers  # Optional, may not be needed for TTS-only operations
-
 # Intel Arc XPU Compatibility Notes:
 # - All TTS operations run on CPU for stability
 # - Flash attention is disabled automatically
@@ -20,5 +17,3 @@ soundfile
 # Watermarking (DISABLED for Intel Arc compatibility)
 # resemble-perth  # Known issues with Python 3.12+ and Intel Arc systems
 
-# Intel Arc XPU specific (if needed)
-# intel-extension-for-pytorch  # Uncomment if you want Intel XPU optimizations for other models
