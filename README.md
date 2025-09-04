@@ -1,4 +1,3 @@
-```markdown
 # ComfyUI_Fill-ChatterBox (Intel Arc XPU Compatible)
 
 If you enjoy this project, consider supporting the original author on Patreon!
@@ -31,7 +30,7 @@ Supports a MAXIMUM of 40 seconds. I've tried removing this limitation, but the m
 1. Clone this repository into your ComfyUI custom_nodes directory:
    ```
    cd /path/to/ComfyUI/custom_nodes
-   git clone https://github.com/[YOUR_USERNAME]/ComfyUI_Fill-ChatterBox-Intel.git
+   git clone https://github.com/ai-joe-git/ComfyUI_Fill-ChatterBox-Intel.git
    ```
 
 2. Install the base dependencies (Intel Arc Compatible):
@@ -170,12 +169,3 @@ Supports a MAXIMUM of 40 seconds. I've tried removing this limitation, but the m
 ## License
 
 Same license as the original project. This is a compatibility fork focused on Intel Arc XPU support.
-```
-
-[1](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/22300945/3d6b6401-e8c2-4da5-9b2a-dc38bc91ee00/chatterbox_node.py)
-[2](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/22300945/068a91d8-2b7b-4d6e-834c-8d60c39f0919/chatterbox_dialog_node.py)
-[3](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/22300945/49b4d6c3-f6c8-44ea-b73e-7dc23157b6f7/README.md)
-[4](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/22300945/a9c87ac3-bccc-4dc5-a99c-d901c7095101/tts.py)
-[5](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/22300945/bd0f43a1-f614-434d-a426-566750ed618d/vc.py)
-[6](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/22300945/54912773-3932-4b03-a6ef-e526f29c09b4/mask.py)
-[7](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/22300945/748ee83f-0da2-49ac-bf67-876e7dbd561c/perceiver.py)
