@@ -29,7 +29,7 @@ def intel_safe_seed_setting(seed):
     """Set seeds compatible with Intel Arc"""
     torch.manual_seed(seed)
     if is_intel_arc_system():
-        # Intel Arc seed setting if needed
+        # Intel Arc seed setting
         pass
     elif torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
@@ -317,7 +317,6 @@ class FL_ChatterboxDialogTTSNode:
                 message += "\nUnloading TTS model as keep_model_loaded is False"
                 self._model = None
                 self._device = None
-                # Intel Arc compatible cache clearing (no explicit clearing needed)
             
             pbar.update_absolute(100)
 
