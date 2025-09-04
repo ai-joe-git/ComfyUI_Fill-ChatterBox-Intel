@@ -1,13 +1,13 @@
 # Copyright (c) 2019 Shigeki Karita
-#               2020 Mobvoi Inc (Binbin Zhang)
-#               2024 Alibaba Inc (authors: Xiang Lyu)
-#
+# 2020 Mobvoi Inc (Binbin Zhang)
+# 2024 Alibaba Inc (authors: Xiang Lyu)
+
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-#
-#   http://www.apache.org/licenses/LICENSE-2.0
-#
+
+# http://www.apache.org/licenses/LICENSE-2.0
+
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,50 +15,28 @@
 # limitations under the License.
 
 import torch
+import logging
 
-'''
-def subsequent_mask(
-        size: int,
-        device: torch.device = torch.device("cpu"),
-) -> torch.Tensor:
-    """Create mask for subsequent steps (size, size).
+# Intel Arc XPU compatibility functions
+def is_intel_arc_system():
+    """Detect if running on Intel Arc XPU"""
+    return hasattr(torch, 'xpu') and torch.xpu.is_available()
 
-    This mask is used only in decoder which works in an auto-regressive mode.
-    This means the current step could only do attention with its left steps.
-
-    In encoder, fully attention is used when streaming is not necessary and
-    the sequence is not long. In this  case, no attention mask is needed.
-
-    When streaming is need, chunk-based attention is used in encoder. See
-    subsequent_chunk_mask for the chunk-based attention mask.
-
-    Args:
-        size (int): size of mask
-        str device (str): "cpu" or "cuda" or torch.Tensor.device
-        dtype (torch.device): result dtype
-
-    Returns:
-        torch.Tensor: mask
-
-    Examples:
-        >>> subsequent_mask(3)
-        [[1, 0, 0],
-         [1, 1, 0],
-         [1, 1, 1]]
-    """
-    ret = torch.ones(size, size, device=device, dtype=torch.bool)
-    return torch.tril(ret)
-'''
-
+def get_safe_device_for_tensor_ops(device):
+    """Get safe device for tensor operations on Intel Arc systems"""
+    # Force CPU for tensor operations on Intel Arc for stability
+    if is_intel_arc_system():
+        return torch.device("cpu")
+    return device
 
 def subsequent_chunk_mask(
-        size: int,
-        chunk_size: int,
-        num_left_chunks: int = -1,
-        device: torch.device = torch.device("cpu"),
+    size: int,
+    chunk_size: int,
+    num_left_chunks: int = -1,
+    device: torch.device = torch.device("cpu"),
 ) -> torch.Tensor:
     """Create mask for subsequent steps (size, size) with chunk size,
-       this is for streaming encoder
+    this is for streaming encoder - Intel Arc XPU Compatible
 
     Args:
         size (int): size of mask
@@ -78,27 +56,35 @@ def subsequent_chunk_mask(
          [1, 1, 1, 1],
          [1, 1, 1, 1]]
     """
+    
+    # Intel Arc XPU compatibility: Force CPU for tensor operations
+    safe_device = get_safe_device_for_tensor_ops(device)
+    
     # NOTE this modified implementation meets onnx export requirements, but it doesn't support num_left_chunks
     # actually this is not needed after we have inference cache implemented, will remove it later
-    pos_idx = torch.arange(size, device=device)
+    pos_idx = torch.arange(size, device=safe_device)
     block_value = (torch.div(pos_idx, chunk_size, rounding_mode='trunc') + 1) * chunk_size
     ret = pos_idx.unsqueeze(0) < block_value.unsqueeze(1)
+    
+    # Move back to original device if different from safe_device
+    if safe_device != device and not is_intel_arc_system():
+        ret = ret.to(device)
+    
     return ret
 
-
 def add_optional_chunk_mask(xs: torch.Tensor,
-                            masks: torch.Tensor,
-                            use_dynamic_chunk: bool,
-                            use_dynamic_left_chunk: bool,
-                            decoding_chunk_size: int,
-                            static_chunk_size: int,
-                            num_decoding_left_chunks: int,
-                            enable_full_context: bool = True):
-    """ Apply optional mask for encoder.
+                           masks: torch.Tensor,
+                           use_dynamic_chunk: bool,
+                           use_dynamic_left_chunk: bool,
+                           decoding_chunk_size: int,
+                           static_chunk_size: int,
+                           num_decoding_left_chunks: int,
+                           enable_full_context: bool = True):
+    """ Apply optional mask for encoder - Intel Arc XPU Compatible.
 
     Args:
         xs (torch.Tensor): padded input, (B, L, D), L for max length
-        mask (torch.Tensor): mask for xs, (B, 1, L)
+        masks (torch.Tensor): mask for xs, (B, 1, L)
         use_dynamic_chunk (bool): whether to use dynamic chunk or not
         use_dynamic_left_chunk (bool): whether to use dynamic left chunk for
             training.
@@ -120,6 +106,13 @@ def add_optional_chunk_mask(xs: torch.Tensor,
     Returns:
         torch.Tensor: chunk mask of the input xs.
     """
+    
+    # Intel Arc XPU compatibility: Ensure tensors are on safe device
+    if is_intel_arc_system():
+        original_device = xs.device
+        xs = xs.to("cpu")
+        masks = masks.to("cpu")
+    
     # Whether to use chunk mask or not
     if use_dynamic_chunk:
         max_len = xs.size(1)
@@ -139,38 +132,52 @@ def add_optional_chunk_mask(xs: torch.Tensor,
                 chunk_size = max_len
             else:
                 chunk_size = chunk_size % 25 + 1
-                if use_dynamic_left_chunk:
-                    max_left_chunks = (max_len - 1) // chunk_size
-                    num_left_chunks = torch.randint(0, max_left_chunks,
-                                                    (1, )).item()
+                
+            if use_dynamic_left_chunk:
+                max_left_chunks = (max_len - 1) // chunk_size
+                num_left_chunks = torch.randint(0, max_left_chunks,
+                                              (1, )).item()
+
         chunk_masks = subsequent_chunk_mask(xs.size(1), chunk_size,
-                                            num_left_chunks,
-                                            xs.device)  # (L, L)
+                                          num_left_chunks,
+                                          xs.device)  # (L, L)
         chunk_masks = chunk_masks.unsqueeze(0)  # (1, L, L)
         chunk_masks = masks & chunk_masks  # (B, L, L)
+        
     elif static_chunk_size > 0:
         num_left_chunks = num_decoding_left_chunks
         chunk_masks = subsequent_chunk_mask(xs.size(1), static_chunk_size,
-                                            num_left_chunks,
-                                            xs.device)  # (L, L)
+                                          num_left_chunks,
+                                          xs.device)  # (L, L)
         chunk_masks = chunk_masks.unsqueeze(0)  # (1, L, L)
         chunk_masks = masks & chunk_masks  # (B, L, L)
     else:
         chunk_masks = masks
+
     assert chunk_masks.dtype == torch.bool
+    
+    # Safety check for all-false masks
     if (chunk_masks.sum(dim=-1) == 0).sum().item() != 0:
-        logging.warning('get chunk_masks all false at some timestep, force set to true, make sure they are masked in futuer computation!')
+        if is_intel_arc_system():
+            print('Intel Arc: get chunk_masks all false at some timestep, force set to true')
+        else:
+            logging.warning('get chunk_masks all false at some timestep, force set to true, make sure they are masked in future computation!')
         chunk_masks[chunk_masks.sum(dim=-1)==0] = True
+
+    # Intel Arc XPU compatibility: Move back to original device if needed
+    if is_intel_arc_system() and 'original_device' in locals():
+        chunk_masks = chunk_masks.to(original_device)
+
     return chunk_masks
 
-
 def make_pad_mask(lengths: torch.Tensor, max_len: int = 0) -> torch.Tensor:
-    """Make mask tensor containing indices of padded part.
-
+    """Make mask tensor containing indices of padded part - Intel Arc XPU Compatible.
     See description of make_non_pad_mask.
 
     Args:
         lengths (torch.Tensor): Batch of lengths (B,).
+        max_len (int): Maximum length for padding
+
     Returns:
         torch.Tensor: Mask tensor containing indices of padded part.
 
@@ -178,16 +185,28 @@ def make_pad_mask(lengths: torch.Tensor, max_len: int = 0) -> torch.Tensor:
         >>> lengths = [5, 3, 2]
         >>> make_pad_mask(lengths)
         masks = [[0, 0, 0, 0 ,0],
-                 [0, 0, 0, 1, 1],
-                 [0, 0, 1, 1, 1]]
+                [0, 0, 0, 1, 1],
+                [0, 0, 1, 1, 1]]
     """
+    
+    # Intel Arc XPU compatibility: Ensure operations on safe device
+    original_device = lengths.device
+    if is_intel_arc_system():
+        lengths = lengths.to("cpu")
+    
     batch_size = lengths.size(0)
     max_len = max_len if max_len > 0 else lengths.max().item()
+    
     seq_range = torch.arange(0,
-                             max_len,
-                             dtype=torch.int64,
-                             device=lengths.device)
+                            max_len,
+                            dtype=torch.int64,
+                            device=lengths.device)
     seq_range_expand = seq_range.unsqueeze(0).expand(batch_size, max_len)
     seq_length_expand = lengths.unsqueeze(-1)
     mask = seq_range_expand >= seq_length_expand
+    
+    # Intel Arc XPU compatibility: Move back to original device if needed
+    if is_intel_arc_system():
+        mask = mask.to(original_device)
+    
     return mask

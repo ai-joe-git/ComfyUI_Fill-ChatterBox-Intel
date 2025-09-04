@@ -1,13 +1,21 @@
 # Copyright (c) 2025 Resemble AI
 # Author: Manmay Nakhashi
 # MIT License
-import math
 
+import math
 import torch
 from torch import nn
 import torch.nn.functional as F
 from einops import rearrange
 
+# Intel Arc XPU compatibility functions
+def is_intel_arc_system():
+    """Detect if running on Intel Arc XPU"""
+    return hasattr(torch, 'xpu') and torch.xpu.is_available()
+
+def disable_flash_attention_for_intel_arc():
+    """Check if flash attention should be disabled for Intel Arc"""
+    return is_intel_arc_system() or torch.backends.mps.is_available()
 
 class RelativePositionBias(nn.Module):
     def __init__(self, scale, causal=False, num_buckets=32, max_distance=128, heads=8):
@@ -33,7 +41,7 @@ class RelativePositionBias(nn.Module):
         is_small = n < max_exact
 
         val_if_large = max_exact + (
-                torch.log(n.float() / max_exact) / math.log(max_distance / max_exact) * (num_buckets - max_exact)
+            torch.log(n.float() / max_exact) / math.log(max_distance / max_exact) * (num_buckets - max_exact)
         ).long()
         val_if_large = torch.min(val_if_large, torch.full_like(val_if_large, num_buckets - 1))
 
@@ -46,11 +54,10 @@ class RelativePositionBias(nn.Module):
         k_pos = torch.arange(j, dtype=torch.long, device=device)
         rel_pos = k_pos[None, :] - q_pos[:, None]
         rp_bucket = self._relative_position_bucket(rel_pos, causal=self.causal, num_buckets=self.num_buckets,
-                                                   max_distance=self.max_distance)
+                                                  max_distance=self.max_distance)
         values = self.relative_attention_bias(rp_bucket)
         bias = rearrange(values, 'i j h -> () h i j')
         return qk_dots + (bias * self.scale)
-
 
 class AttentionQKV(nn.Module):
     def __init__(self, n_heads, head_dim, dropout_rate=0.1, scale=None, flash=False):
@@ -58,13 +65,24 @@ class AttentionQKV(nn.Module):
         self.n_heads = n_heads
         self.head_dim = head_dim
         self.scale = scale if scale is not None else head_dim ** -0.5
-        self.flash = flash
+        
+        # Intel Arc XPU compatibility: Disable flash attention for Intel Arc systems
+        if disable_flash_attention_for_intel_arc():
+            self.flash = False
+            if flash:
+                print("Intel Arc XPU or MPS detected: Disabling flash attention for stability")
+        else:
+            self.flash = flash
+            
         self.dropout_rate = dropout_rate
         self.dropout = nn.Dropout(dropout_rate)
-        self.flash_config = self.setup_flash_config() if flash else None
+        self.flash_config = self.setup_flash_config() if self.flash else None
 
     def setup_flash_config(self):
-        # Setup flash attention configuration
+        # Setup flash attention configuration - disabled for Intel Arc
+        if disable_flash_attention_for_intel_arc():
+            return None
+            
         flash_config = {
             'enable_flash': True,
             'enable_math': True,
@@ -74,14 +92,22 @@ class AttentionQKV(nn.Module):
 
     def forward(self, q, k, v, mask=None):
         q, k, v = [self.split_heads(tensor) for tensor in [q, k, v]]
-        if self.flash:
-            out = self.flash_attention(q, k, v, mask=mask)
+        
+        # Intel Arc XPU compatibility: Always use scaled dot product attention
+        if self.flash and not disable_flash_attention_for_intel_arc():
+            try:
+                out = self.flash_attention(q, k, v, mask=mask)
+            except Exception as e:
+                if is_intel_arc_system():
+                    print(f"Intel Arc: Flash attention failed, falling back to regular attention: {e}")
+                out = self.scaled_dot_product_attention(q, k, v, mask=mask)
         else:
             out = self.scaled_dot_product_attention(q, k, v, mask=mask)
-
+            
         return self.combine_heads(out)
 
     def scaled_dot_product_attention(self, q, k, v, mask=None):
+        """Standard scaled dot product attention - Intel Arc XPU Compatible"""
         sim = torch.einsum("bhlt,bhls->bhts", q, k) * self.scale
         if mask is not None:
             sim = sim.masked_fill(mask == 0, float('-inf'))
@@ -90,14 +116,26 @@ class AttentionQKV(nn.Module):
         return torch.einsum("bhts,bhls->bhlt", attn, v)
 
     def flash_attention(self, q, k, v, mask=None):
+        """Flash attention with Intel Arc XPU compatibility checks"""
+        # Intel Arc XPU compatibility: Skip flash attention entirely
+        if disable_flash_attention_for_intel_arc():
+            return self.scaled_dot_product_attention(q, k, v, mask=mask)
+        
         config = self.flash_config if self.flash_config else {}
-        with torch.backends.cuda.sdp_kernel(**config):
-            out = F.scaled_dot_product_attention(
-                q, k, v,
-                attn_mask=mask,
-                dropout_p=self.dropout_rate if self.training else 0.
-            )
-        return out
+        try:
+            # CUDA-specific flash attention - will fail on Intel Arc
+            with torch.backends.cuda.sdp_kernel(**config):
+                out = F.scaled_dot_product_attention(
+                    q, k, v,
+                    attn_mask=mask,
+                    dropout_p=self.dropout_rate if self.training else 0.0
+                )
+            return out
+        except Exception as e:
+            if is_intel_arc_system():
+                print(f"Intel Arc: CUDA flash attention not available, using regular attention: {e}")
+            # Fallback to regular attention
+            return self.scaled_dot_product_attention(q, k, v, mask=mask)
 
     def split_heads(self, x):
         bs, length, _ = x.shape
@@ -109,11 +147,11 @@ class AttentionQKV(nn.Module):
         x = x.permute(0, 2, 1, 3).contiguous()
         return x.view(bs, length, -1)
 
-
 class AttentionBlock2(nn.Module):
     """
     An attention block that allows spatial positions to attend to each other,
     using AttentionQKV and separate linear transformations for Q, K, and V.
+    Intel Arc XPU Compatible Version.
     """
 
     def __init__(
@@ -128,7 +166,7 @@ class AttentionBlock2(nn.Module):
     ):
         super().__init__()
         self.channels = channels
-
+        
         if num_head_channels == -1:
             self.num_heads = num_heads
         else:
@@ -144,12 +182,27 @@ class AttentionBlock2(nn.Module):
         self.to_k = nn.Linear(channels, channels)
         self.to_v = nn.Linear(channels, channels)
 
-        self.attention = AttentionQKV(self.num_heads, channels // self.num_heads, dropout_rate=dropout_rate, flash=flash_attention, scale=scale)
-
+        # Intel Arc XPU compatibility: Disable flash attention for Intel Arc systems
+        intel_compatible_flash = flash_attention and not disable_flash_attention_for_intel_arc()
+        
+        self.attention = AttentionQKV(
+            self.num_heads, 
+            channels // self.num_heads, 
+            dropout_rate=dropout_rate, 
+            flash=intel_compatible_flash, 
+            scale=scale
+        )
+        
         self.proj_out = nn.Linear(channels, channels)
 
         if relative_pos_embeddings:
-            self.relative_pos_embeddings = RelativePositionBias(scale=(channels // self.num_heads) ** .5, causal=False, heads=num_heads, num_buckets=32, max_distance=64)
+            self.relative_pos_embeddings = RelativePositionBias(
+                scale=(channels // self.num_heads) ** .5, 
+                causal=False, 
+                heads=self.num_heads, 
+                num_buckets=32, 
+                max_distance=64
+            )
         else:
             self.relative_pos_embeddings = None
 
@@ -164,17 +217,33 @@ class AttentionBlock2(nn.Module):
         k = self.to_k(x2_norm)
         v = self.to_v(x2_norm)
 
-        h = self.attention(q, k, v, mask=mask)
-        h = self.proj_out(h)
+        # Intel Arc XPU compatibility: Ensure tensors are on compatible device
+        if is_intel_arc_system():
+            # Force CPU execution for attention operations on Intel Arc
+            original_device = q.device
+            if original_device.type == 'xpu':
+                q, k, v = q.to('cpu'), k.to('cpu'), v.to('cpu')
+                if mask is not None:
+                    mask = mask.to('cpu')
+                
+                h = self.attention(q, k, v, mask=mask)
+                h = h.to(original_device)
+            else:
+                h = self.attention(q, k, v, mask=mask)
+        else:
+            h = self.attention(q, k, v, mask=mask)
 
+        h = self.proj_out(h)
         return (x1 + h).reshape(b1, c1, *spatial1)
 
-
 class Perceiver(nn.Module):
-    """Inspired by https://arxiv.org/abs/2103.03206"""
+    """Inspired by https://arxiv.org/abs/2103.03206
+    Intel Arc XPU Compatible Version
+    """
+
     def __init__(self, pre_attention_query_token=32, pre_attention_query_size=1024, embedding_dim=1024, num_attn_heads=4):
         """
-        Initialize the perceiver module.
+        Initialize the perceiver module with Intel Arc XPU compatibility.
 
         :param pre_attention_query_token: Number of query tokens for pre-attention
         :param pre_attention_query_size: Size of each query token
@@ -182,7 +251,7 @@ class Perceiver(nn.Module):
         :param num_attn_heads: Number of attention heads
         """
         super().__init__()
-
+        
         # Initialize the pre-attention query parameter
         self.pre_attention_query = torch.nn.Parameter(
             torch.empty(1, pre_attention_query_token, pre_attention_query_size)
@@ -194,19 +263,48 @@ class Perceiver(nn.Module):
         # Initialize the pre-attention query with uniform distribution
         self.pre_attention_query.data.uniform_(-query_variance, query_variance)
 
-        # Initialize the attention block
-        self.attn = AttentionBlock2(embedding_dim, num_attn_heads)
+        # Initialize the attention block with Intel Arc compatibility
+        self.attn = AttentionBlock2(
+            embedding_dim, 
+            num_attn_heads, 
+            flash_attention=not disable_flash_attention_for_intel_arc()
+        )
+        
+        if is_intel_arc_system():
+            print("Intel Arc XPU detected: Perceiver initialized with CPU-compatible attention")
 
     def forward(self, h):
         """
-        Forward pass of the perceiver module.
+        Forward pass of the perceiver module with Intel Arc XPU compatibility.
+
         :param h: Input tensor
         :return: Output after applying attention mechanisms
         """
-        # Expand the pre-attention query to match the batch size of the input
-        query_ = self.pre_attention_query.expand(h.shape[0], -1, -1)
-        # Apply the first attention mechanism (cross-attention)
-        pre_att = self.attn(query_, h)
-        # Apply the second attention mechanism (self-attention)
-        attn = self.attn(pre_att, pre_att)
-        return attn
+        
+        # Intel Arc XPU compatibility: Handle device management
+        if is_intel_arc_system() and h.device.type == 'xpu':
+            # Move to CPU for attention operations, then back to XPU
+            original_device = h.device
+            h_cpu = h.to('cpu')
+            query_cpu = self.pre_attention_query.expand(h_cpu.shape[0], -1, -1).to('cpu')
+            
+            # Apply the first attention mechanism (cross-attention)
+            pre_att = self.attn(query_cpu, h_cpu)
+            
+            # Apply the second attention mechanism (self-attention)
+            attn = self.attn(pre_att, pre_att)
+            
+            # Move result back to original device
+            return attn.to(original_device)
+        else:
+            # Standard operation for non-Intel Arc systems
+            # Expand the pre-attention query to match the batch size of the input
+            query_ = self.pre_attention_query.expand(h.shape[0], -1, -1)
+
+            # Apply the first attention mechanism (cross-attention)
+            pre_att = self.attn(query_, h)
+
+            # Apply the second attention mechanism (self-attention)
+            attn = self.attn(pre_att, pre_att)
+
+            return attn

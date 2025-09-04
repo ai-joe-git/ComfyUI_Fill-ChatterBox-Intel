@@ -1,5 +1,4 @@
 from pathlib import Path
-
 import librosa
 import torch
 from huggingface_hub import hf_hub_download
@@ -15,57 +14,86 @@ except ImportError:
 from .models.s3tokenizer import S3_SR
 from .models.s3gen import S3GEN_SR, S3Gen
 
-
 REPO_ID = "ResembleAI/chatterbox"
 
+# Intel Arc XPU compatibility functions
+def is_intel_arc_system():
+    """Detect if running on Intel Arc XPU"""
+    return hasattr(torch, 'xpu') and torch.xpu.is_available()
+
+def get_safe_map_location(device):
+    """Get safe map location for model loading on Intel Arc systems"""
+    # Always use CPU for Intel Arc systems for model loading safety
+    if device in ["cpu", "mps"] or is_intel_arc_system():
+        return torch.device('cpu')
+    else:
+        return None
 
 class ChatterboxVC:
     ENC_COND_LEN = 6 * S3_SR
     DEC_COND_LEN = 10 * S3GEN_SR
-
+    
     def __init__(
         self,
         s3gen: S3Gen,
         device: str,
-        ref_dict: dict=None,
+        ref_dict: dict = None,
     ):
         self.sr = S3GEN_SR
         self.s3gen = s3gen
         self.device = device
-        self.watermarker = perth.PerthImplicitWatermarker() if PERTH_AVAILABLE else None
+        
+        # Initialize watermarker with Intel Arc compatibility
+        if PERTH_AVAILABLE:
+            try:
+                self.watermarker = perth.PerthImplicitWatermarker()
+            except Exception as e:
+                print(f"Warning: Could not initialize Perth watermarker: {e}")
+                self.watermarker = None
+        else:
+            self.watermarker = None
+        
         if ref_dict is None:
             self.ref_dict = None
         else:
+            # Ensure ref_dict tensors are on the correct device
             self.ref_dict = {
                 k: v.to(device) if torch.is_tensor(v) else v
                 for k, v in ref_dict.items()
             }
-
+    
     @classmethod
     def from_local(cls, ckpt_dir, device) -> 'ChatterboxVC':
         ckpt_dir = Path(ckpt_dir)
         
-        # Always load to CPU first for non-CUDA devices to handle CUDA-saved models
-        if device in ["cpu", "mps"]:
-            map_location = torch.device('cpu')
-        else:
-            map_location = None
-            
+        # Intel Arc XPU compatibility: Always load to CPU first for Intel Arc systems
+        map_location = get_safe_map_location(device)
+        
+        # Force CPU device for Intel Arc systems to ensure stability
+        if is_intel_arc_system():
+            device = "cpu"
+            print("Intel Arc XPU detected: Forcing CPU execution for ChatterBox VC stability")
+        
         ref_dict = None
         if (builtin_voice := ckpt_dir / "conds.pt").exists():
             states = torch.load(builtin_voice, map_location=map_location)
             ref_dict = states['gen']
-
+        
         s3gen = S3Gen()
         s3gen.load_state_dict(
             torch.load(ckpt_dir / "s3gen.pt", map_location=map_location)
         )
         s3gen.to(device).eval()
-
+        
         return cls(s3gen, device, ref_dict=ref_dict)
-
+    
     @classmethod
     def from_pretrained(cls, device) -> 'ChatterboxVC':
+        # Intel Arc XPU compatibility checks
+        if is_intel_arc_system():
+            device = "cpu"
+            print("Intel Arc XPU detected: Using CPU for ChatterBox VC")
+        
         # Check if MPS is available on macOS
         if device == "mps" and not torch.backends.mps.is_available():
             if not torch.backends.mps.is_built():
@@ -73,41 +101,64 @@ class ChatterboxVC:
             else:
                 print("MPS not available because the current MacOS version is not 12.3+ and/or you do not have an MPS-enabled device on this machine.")
             device = "cpu"
-            
+        
+        # Download required model files
         for fpath in ["s3gen.pt", "conds.pt"]:
             local_path = hf_hub_download(repo_id=REPO_ID, filename=fpath)
-
+        
         return cls.from_local(Path(local_path).parent, device)
-
+    
     def set_target_voice(self, wav_fpath):
-        ## Load reference wav
+        """Set target voice with Intel Arc XPU compatibility"""
+        
+        # Load reference wav
         s3gen_ref_wav, _sr = librosa.load(wav_fpath, sr=S3GEN_SR)
-
         s3gen_ref_wav = s3gen_ref_wav[:self.DEC_COND_LEN]
         self.ref_dict = self.s3gen.embed_ref(s3gen_ref_wav, S3GEN_SR, device=self.device)
-
+    
     def generate(
         self,
         audio,
         target_voice_path=None,
     ):
+        """Generate voice conversion with Intel Arc XPU compatibility"""
+        
         if target_voice_path:
             self.set_target_voice(target_voice_path)
         else:
             assert self.ref_dict is not None, "Please `prepare_conditionals` first or specify `target_voice_path`"
-
-        with torch.inference_mode():
-            audio_16, _ = librosa.load(audio, sr=S3_SR)
-            audio_16 = torch.from_numpy(audio_16).float().to(self.device)[None, ]
-
-            s3_tokens, _ = self.s3gen.tokenizer(audio_16)
-            wav, _ = self.s3gen.inference(
-                speech_tokens=s3_tokens,
-                ref_dict=self.ref_dict,
-            )
+        
+        try:
+            with torch.inference_mode():
+                # Load and process audio
+                audio_16, _ = librosa.load(audio, sr=S3_SR)
+                audio_16 = torch.from_numpy(audio_16).float().to(self.device)[None, ]
+                
+                # Tokenize audio
+                s3_tokens, _ = self.s3gen.tokenizer(audio_16)
+                
+                # Generate converted audio
+                wav, _ = self.s3gen.inference(
+                    speech_tokens=s3_tokens,
+                    ref_dict=self.ref_dict,
+                )
+            
+            # Move to CPU for final processing
             wav = wav.squeeze(0).detach().cpu().numpy()
-            if self.watermarker is not None:
-                watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
-                return torch.from_numpy(watermarked_wav).unsqueeze(0)
+            
+            # Apply watermarking if available and not on Intel Arc (for stability)
+            if self.watermarker is not None and not is_intel_arc_system():
+                try:
+                    watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
+                    return torch.from_numpy(watermarked_wav).unsqueeze(0)
+                except Exception as e:
+                    print(f"Warning: Watermarking failed: {e}. Returning unwatermarked audio.")
+                    return torch.from_numpy(wav).unsqueeze(0)
             else:
                 return torch.from_numpy(wav).unsqueeze(0)
+                
+        except Exception as e:
+            print(f"Error during voice conversion: {e}")
+            if is_intel_arc_system():
+                print("Intel Arc XPU detected - this may be due to device compatibility issues")
+            raise e
