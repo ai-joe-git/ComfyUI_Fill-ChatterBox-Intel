@@ -15,7 +15,7 @@ This fork has been specifically modified to work with Intel Arc XPU systems by f
 
 Supports a MAXIMUM of 40 seconds. I've tried removing this limitation, but the model falls apart really badly with anything longer than that, so it remains.
 
-![ChatterBox Example](web/image.png)
+![ChatterBox Example](21ad5cf3-cff2-415d-9387-615098d8a149.png)
 
 ## 🔧 Intel Arc XPU Compatibility Features
 
@@ -169,3 +169,4 @@ Supports a MAXIMUM of 40 seconds. I've tried removing this limitation, but the m
 ## License
 
 Same license as the original project. This is a compatibility fork focused on Intel Arc XPU support.
+
